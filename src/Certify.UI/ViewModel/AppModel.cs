@@ -26,6 +26,17 @@ namespace Certify.UI.ViewModel
 
         public PluginManager PluginManager { get; set; }
 
+        public string CurrentError { get; set; }
+        public bool IsError { get; set; }
+
+        public void RaiseError(Exception exp)
+        {
+            this.IsError = true;
+            this.CurrentError = exp.Message;
+
+            System.Windows.MessageBox.Show(exp.Message);
+        }
+
         #region properties
 
         /// <summary>
@@ -46,8 +57,8 @@ namespace Certify.UI.ViewModel
             var registration = new VaultItem { Name = "Registrations" };
             registration.Children = new List<VaultItem>();
 
-            var reg = certifyManager.GetRegistrations();
-            foreach (var r in reg)
+            var contactRegistrations = certifyManager.GetContactRegistrations();
+            foreach (var r in contactRegistrations)
             {
                 r.ItemType = "registration";
                 registration.Children.Add(r);
@@ -61,7 +72,7 @@ namespace Certify.UI.ViewModel
             var identifiers = new VaultItem { Name = "Identifiers" };
             identifiers.Children = new List<VaultItem>();
 
-            var ids = certifyManager.GetIdentifiers();
+            var ids = certifyManager.GeDomainIdentifiers();
             foreach (var i in ids)
             {
                 i.ItemType = "identifier";
@@ -104,6 +115,21 @@ namespace Certify.UI.ViewModel
             }
         }
 
+        public bool HasSelectedItemDomainOptions
+        {
+            get
+            {
+                if (SelectedItem != null && SelectedItem.DomainOptions != null && SelectedItem.DomainOptions.Any())
+                {
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+        }
+
         public Certify.Models.ManagedSite SelectedItem { get; set; }
 
         public bool IsRegisteredVersion { get; set; }
@@ -128,8 +154,14 @@ namespace Certify.UI.ViewModel
             get
             {
                 //get list of sites from IIS
-                var iisManager = new IISManager();
-                return iisManager.GetPrimarySites(Certify.Properties.Settings.Default.IgnoreStoppedSites);
+                if (certifyManager.IsIISAvailable)
+                {
+                    return certifyManager.GetPrimaryWebSites(Certify.Properties.Settings.Default.IgnoreStoppedSites);
+                }
+                else
+                {
+                    return new List<SiteBindingItem>();
+                }
             }
         }
 
@@ -181,9 +213,14 @@ namespace Certify.UI.ViewModel
         {
             if (SelectedItem != null)
             {
-                SelectedItem.IsChanged = false;
+                //mark all SelectedItem child items and main model as unchanged
+                foreach (var opt in SelectedItem.DomainOptions)
+                {
+                    opt.IsChanged = false;
+                }
+
                 SelectedItem.RequestConfig.IsChanged = false;
-                SelectedItem.DomainOptions.ForEach(d => d.IsChanged = false);
+                SelectedItem.IsChanged = false;
             }
 
             RaisePropertyChanged(nameof(SelectedItemHasChanges));
@@ -323,6 +360,14 @@ namespace Certify.UI.ViewModel
             ProgressResults = new ObservableCollection<RequestProgressState>();
         }
 
+        public bool IsIISAvailable
+        {
+            get
+            {
+                return certifyManager.IsIISAvailable;
+            }
+        }
+
         public void PreviewImport(bool sanMergeMode)
         {
             AppViewModel.IsImportSANMergeMode = sanMergeMode;
@@ -336,15 +381,6 @@ namespace Certify.UI.ViewModel
             this.ManagedSites = new ObservableCollection<ManagedSite>(certifyManager.GetManagedSites());
             this.ImportedManagedSites = new ObservableCollection<ManagedSite>();
 
-            if (!this.ManagedSites.Any())
-            {
-                //if we have a vault, preview import. //TODO: make this async and only perform after UI has shown
-                PreviewImport(sanMergeMode: true);
-
-                //if we have no vault, start a new one
-
-                //if we have no registered contacts in the vault then prompt to register a contact
-            }
             /*if (this.ManagedSites.Any())
             {
                 //preselect the first managed site
@@ -363,16 +399,21 @@ namespace Certify.UI.ViewModel
 
         public async void RenewAll(bool autoRenewalsOnly)
         {
+            //FIXME: currently user can run renew all again while renewals are still in progress
+
             Dictionary<string, Progress<RequestProgressState>> itemTrackers = new Dictionary<string, Progress<RequestProgressState>>();
             foreach (var s in ManagedSites)
             {
                 if ((autoRenewalsOnly && s.IncludeInAutoRenew) || !autoRenewalsOnly)
                 {
                     var progressState = new RequestProgressState { ManagedItem = s };
-                    itemTrackers.Add(s.Id, new Progress<RequestProgressState>(progressState.ProgressReport));
+                    if (!itemTrackers.ContainsKey(s.Id))
+                    {
+                        itemTrackers.Add(s.Id, new Progress<RequestProgressState>(progressState.ProgressReport));
 
-                    //begin monitoring progress
-                    BeginTrackingProgress(progressState);
+                        //begin monitoring progress
+                        BeginTrackingProgress(progressState);
+                    }
                 }
             }
 
@@ -419,7 +460,10 @@ namespace Certify.UI.ViewModel
         {
             if (this.SelectedItem != null && this.SelectedItem.DomainOptions != null)
             {
-                this.SelectedItem.DomainOptions.ForEach(d => d.IsSelected = true);
+                foreach (var opt in this.SelectedItem.DomainOptions)
+                {
+                    opt.IsSelected = true;
+                }
             }
         }
 
@@ -427,7 +471,12 @@ namespace Certify.UI.ViewModel
         {
             if (this.SelectedItem != null && this.SelectedItem.DomainOptions != null)
             {
-                this.SelectedItem.DomainOptions.ForEach(d => d.IsSelected = false);
+                foreach (var opt in this.SelectedItem.DomainOptions)
+                {
+                    opt.IsSelected = false;
+                }
+
+                // RaisePropertyChanged(nameof(SelectedItem));
             }
         }
 
@@ -438,6 +487,7 @@ namespace Certify.UI.ViewModel
         private ManagedSite GetUpdatedManagedSiteSettings()
         {
             var item = SelectedItem;
+            // item.DomainOptions = new ObservableCollection<DomainOption>();
             var config = item.RequestConfig;
 
             // RefreshDomainOptionSettingsFromUI();
@@ -470,8 +520,6 @@ namespace Certify.UI.ViewModel
 
                 item.Id = Guid.NewGuid().ToString() + ":" + siteInfo.SiteId;
                 item.GroupId = siteInfo.SiteId;
-
-                config.WebsiteRootPath = Environment.ExpandEnvironmentVariables(siteInfo.PhysicalPath);
             }
 
             item.ItemType = ManagedItemType.SSL_LetsEncrypt_LocalIIS;
@@ -499,59 +547,24 @@ namespace Certify.UI.ViewModel
             managedSite.RequestConfig.EnableFailureNotifications = true;
             managedSite.RequestConfig.ChallengeType = "http-01";
             managedSite.IncludeInAutoRenew = true;
-            managedSite.DomainOptions = new List<DomainOption>();
-
+            managedSite.ClearDomainOptions();
             //for the given selected web site, allow the user to choose which domains to combine into one certificate
 
-            var defaultNoDomainHost = "(default binding)";
-            var allSites = new IISManager().GetSiteBindingList(Certify.Properties.Settings.Default.IgnoreStoppedSites, siteId);
-            var domains = new List<DomainOption>();
-            foreach (var d in allSites)
+            List<DomainOption> domainOptions = certifyManager.GetDomainOptionsFromSite(siteId);
+            if (domainOptions.Any())
             {
-                if (d.SiteId == siteId)
-                {
-                    //if domain not currently in the list of options, add it
-                    if (!domains.Any(item => item.Domain == d.Host))
-                    {
-                        DomainOption opt = new DomainOption
-                        {
-                            Domain = d.Host,
-                            IsPrimaryDomain = false,
-                            IsSelected = true
-                        };
-                        if (String.IsNullOrEmpty(opt.Domain)) opt.Domain = defaultNoDomainHost;
-
-                        domains.Add(opt);
-                    }
-                }
+                managedSite.AddDomainOptions(domainOptions);
             }
 
-            //TODO: if one or more binding is to a specific IP, how to manage in UI?
-
-            if (domains.Any(d => !String.IsNullOrEmpty(d.Domain)))
-            {
-                // mark first domain as primary, if we have no other settings
-                if (!domains.Any(d => d.IsPrimaryDomain == true))
-                {
-                    var electableDomains = domains.Where(d => !String.IsNullOrEmpty(d.Domain) && d.Domain != defaultNoDomainHost);
-                    if (electableDomains.Any())
-                    {
-                        // promote first domain in list to primary by default
-                        electableDomains.First().IsPrimaryDomain = true;
-                    }
-                }
-
-                managedSite.DomainOptions = domains;
-
-                //MainViewModel.EnsureNotifyPropertyChange(nameof(MainViewModel.PrimarySubjectDomain));
-            }
-
-            if (!domains.Any(d => d.Domain != defaultNoDomainHost))
+            if (!managedSite.DomainOptions.Any())
             {
                 ValidationError = "The selected site has no domain bindings setup. Configure the domains first using Edit Bindings in IIS.";
             }
+
             //TODO: load settings from previously saved managed site?
             RaisePropertyChanged(nameof(PrimarySubjectDomain));
+
+            RaisePropertyChanged(nameof(HasSelectedItemDomainOptions));
         }
 
         public async void BeginCertificateRequest(string managedItemId)
@@ -571,7 +584,7 @@ namespace Certify.UI.ViewModel
                 BeginTrackingProgress(progressState);
 
                 var progressIndicator = new Progress<RequestProgressState>(progressState.ProgressReport);
-                var result = await certifyManager.PerformCertificateRequest(null, managedSite, progressIndicator);
+                var result = await certifyManager.PerformCertificateRequest(managedSite, progressIndicator);
 
                 if (progressIndicator != null)
                 {
@@ -608,7 +621,7 @@ namespace Certify.UI.ViewModel
         public ICommand SANSelectAllCommand => new RelayCommand<object>(SANSelectAll);
         public ICommand SANSelectNoneCommand => new RelayCommand<object>(SANSelectNone);
 
-        public ICommand AddContactCommand => new RelayCommand<ContactRegistration>(AddContactRegistration);
+        public ICommand AddContactCommand => new RelayCommand<ContactRegistration>(AddContactRegistration, this);
 
         public ICommand PopulateManagedSiteSettingsCommand => new RelayCommand<string>(PopulateManagedSiteSettings);
         public ICommand BeginCertificateRequestCommand => new RelayCommand<string>(BeginCertificateRequest);

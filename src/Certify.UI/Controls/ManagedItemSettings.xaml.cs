@@ -1,20 +1,13 @@
 ﻿using Certify.Management;
 using Certify.Models;
+using Microsoft.Win32;
 using System;
-using System.Collections.Generic;
-using System.Globalization;
+using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Security.Cryptography.X509Certificates;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
+using WinForms = System.Windows.Forms;
 
 namespace Certify.UI.Controls
 {
@@ -34,6 +27,26 @@ namespace Certify.UI.Controls
         public ManagedItemSettings()
         {
             InitializeComponent();
+            this.MainViewModel.PropertyChanged += MainViewModel_PropertyChanged;
+        }
+
+        private void MainViewModel_PropertyChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            this.SettingsTab.SelectedIndex = 0;
+
+            if (this.MainViewModel.SelectedItem != null)
+            {
+                //populate info
+                if (!String.IsNullOrEmpty(this.MainViewModel.SelectedItem.CertificatePath))
+                {
+                    CertPath.Content = this.MainViewModel.SelectedItem.CertificatePath;
+                }
+            }
+            else
+            {
+                //clear info
+                CertPath.Content = "Certificate Path: ";
+            }
         }
 
         private void Button_Save(object sender, RoutedEventArgs e)
@@ -56,6 +69,13 @@ namespace Certify.UI.Controls
                 {
                     MessageBox.Show("A Primary Domain must be selected");
                     return;
+                }
+
+                if (MainViewModel.SelectedItem.RequestConfig.PerformAutomatedCertBinding)
+                {
+                    MainViewModel.SelectedItem.RequestConfig.BindingIPAddress = null;
+                    MainViewModel.SelectedItem.RequestConfig.BindingPort = null;
+                    MainViewModel.SelectedItem.RequestConfig.BindingUseSNI = null;
                 }
                 //save changes
 
@@ -144,55 +164,127 @@ namespace Certify.UI.Controls
             }
         }
 
-        private void PrimaryDomain_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            /*if (e.AddedItems.Count > 0)
-            {
-                var primaryDomain = (DomainOption)e.AddedItems[0];
-                foreach (var d in MainViewModel.SelectedItem.DomainOptions)
-                {
-                    if (d.Domain == primaryDomain.Domain)
-                    {
-                        d.IsPrimaryDomain = true;
-                    }
-                    else
-                    {
-                        d.IsPrimaryDomain = false;
-                    }
-                }
-            }*/
-        }
-
         private void SANDomain_Toggled(object sender, RoutedEventArgs e)
         {
             this.MainViewModel.SelectedItem.IsChanged = true;
         }
 
-        private void TabablzControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void OpenLogFile_Click(object sender, RoutedEventArgs e)
         {
-        }
-    }
+            if (this.MainViewModel?.SelectedItem?.Id == null) return;
 
-    [System.Windows.Data.ValueConversion(typeof(bool), typeof(bool))]
-    public class InverseBooleanConverter : System.Windows.Data.IValueConverter
-    {
-        #region IValueConverter Members
+            // get file path for log
+            var logPath = Models.ManagedSiteLog.GetLogPath(this.MainViewModel.SelectedItem.Id);
 
-        public object Convert(object value, Type targetType, object parameter,
-            System.Globalization.CultureInfo culture)
-        {
-            if (targetType != typeof(bool?) && targetType != typeof(bool))
-                throw new InvalidOperationException("The target must be a boolean");
-            if (value == null) return false;
-            return !(bool)value;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter,
-            System.Globalization.CultureInfo culture)
-        {
-            return Convert(value, targetType, parameter, culture);
+            //check file exists, if not inform user
+            if (System.IO.File.Exists(logPath))
+            {
+                //open file
+                System.Diagnostics.Process.Start(logPath);
+            }
+            else
+            {
+                MessageBox.Show("The log file for this item has not been created yet.");
+            }
         }
 
-        #endregion IValueConverter Members
+        private void OpenCertificateFile_Click(object sender, RoutedEventArgs e)
+        {
+            // get file path for log
+            var certPath = this.MainViewModel.SelectedItem.CertificatePath;
+
+            //check file exists, if not inform user
+            if (!String.IsNullOrEmpty(certPath) && System.IO.File.Exists(certPath))
+            {
+                //open file
+                var cert = new CertificateManager().GetCertificate(certPath);
+                if (cert != null)
+                {
+                    X509Certificate2UI.DisplayCertificate(cert);
+                }
+            }
+            else
+            {
+                MessageBox.Show("The certificate file for this item has not been created yet.");
+            }
+        }
+
+        private void DirectoryBrowse_Click(object sender, EventArgs e)
+        {
+            var config = MainViewModel.SelectedItem.RequestConfig;
+            var dialog = new WinForms.FolderBrowserDialog()
+            {
+                SelectedPath = config.WebsiteRootPath
+            };
+            if (dialog.ShowDialog() == WinForms.DialogResult.OK)
+            {
+                config.WebsiteRootPath = dialog.SelectedPath;
+            }
+        }
+
+        private void FileBrowse_Click(object sender, EventArgs e)
+        {
+            var button = (Button)sender;
+            var config = MainViewModel.SelectedItem.RequestConfig;
+            var dialog = new OpenFileDialog()
+            {
+                Filter = "Powershell Scripts (*.ps1)| *.ps1;"
+            };
+            Action saveAction = null;
+            string filename = "";
+            if (button.Name == "Button_PreRequest")
+            {
+                filename = config.PreRequestPowerShellScript;
+                saveAction = () => config.PreRequestPowerShellScript = dialog.FileName;
+            }
+            else if (button.Name == "Button_PostRequest")
+            {
+                filename = config.PostRequestPowerShellScript;
+                saveAction = () => config.PostRequestPowerShellScript = dialog.FileName;
+            }
+            try
+            {
+                var fileInfo = new FileInfo(filename);
+                if (fileInfo.Directory.Exists)
+                {
+                    dialog.InitialDirectory = fileInfo.Directory.FullName;
+                    dialog.FileName = fileInfo.Name;
+                }
+            }
+            catch (ArgumentException)
+            {
+                // invalid file passed in, open dialog with default options
+            }
+            if (dialog.ShowDialog() == true)
+            {
+                saveAction();
+            }
+        }
+
+        private async void TestScript_Click(object sender, EventArgs e)
+        {
+            var button = (Button)sender;
+            string scriptFile = null;
+            var result = new CertificateRequestResult { ManagedItem = MainViewModel.SelectedItem, IsSuccess = true, Message = "Script Testing Message" };
+            if (button.Name == "Button_TestPreRequest")
+            {
+                scriptFile = MainViewModel.SelectedItem.RequestConfig.PreRequestPowerShellScript;
+                result.IsSuccess = false; // pre-request messages will always have IsSuccess = false
+            }
+            else if (button.Name == "Button_TestPostRequest")
+            {
+                scriptFile = MainViewModel.SelectedItem.RequestConfig.PostRequestPowerShellScript;
+            }
+            if (string.IsNullOrEmpty(scriptFile)) return; // don't try to run empty script
+            try
+            {
+                string scriptOutput = await PowerShellManager.RunScript(result, scriptFile);
+                MessageBox.Show(scriptOutput, "Powershell Output", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (ArgumentException ex)
+            {
+                MessageBox.Show(ex.Message, "Script Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
     }
 }
