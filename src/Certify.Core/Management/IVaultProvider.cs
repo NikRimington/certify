@@ -2,9 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
-using ACMESharp.Vault.Model;
 
 namespace Certify.Management
 {
@@ -22,6 +20,10 @@ namespace Certify.Management
 
         string GetVaultSummary();
 
+        ActionLogItem GetLastActionLogItem();
+
+        List<string> GetActionSummary();
+
         void EnableSensitiveFileEncryption();
 
         string ComputeDomainIdentifierId(string domain);
@@ -32,10 +34,16 @@ namespace Certify.Management
 
         PendingAuthorization PerformIISAutomatedChallengeResponse(IISManager iisManager, ManagedSite managedSite, PendingAuthorization pendingAuth);
 
+        Task<APIResult> TestChallengeResponse(IISManager iisManager, ManagedSite managedSite, bool isPreviewMode);
+
         void SubmitChallenge(string domainIdentifierId, string challengeType);
 
         bool CompleteIdentifierValidationProcess(string alias);
 
         ProcessStepResult PerformCertificateRequestProcess(string primaryDnsIdentifier, string[] alternativeDnsIdentifiers);
+
+        Task<APIResult> RevokeCertificate(ManagedSite managedSite);
+
+        void PerformVaultCleanup();
     }
 }

@@ -28,10 +28,29 @@ using System.Text.RegularExpressions;
 namespace Certify.ACMESharpCompat
 {
     /// <summary>
-    /// Port of powershell methods from ACMESharp.POSH
+    /// Port of powershell methods from ACMESharp.POSH 
     /// </summary>
     public static class ACMESharpUtils
     {
+        /// <summary>
+        /// Identifier validation challenge type indicator for <see
+        /// cref="https://tools.ietf.org/html/draft-ietf-acme-acme-01#section-7.5"> DNS </see>.
+        /// </summary>
+        public static readonly string CHALLENGE_TYPE_DNS = "dns-01";
+
+        /// <summary>
+        /// Identifier validation challenge type indicator for <see
+        /// cref="https://tools.ietf.org/html/draft-ietf-acme-acme-01#section-7.2"> HTTP
+        /// (non-SSL/TLS) </see>.
+        /// </summary>
+        public const string CHALLENGE_TYPE_HTTP = "http-01";
+
+        /// <summary>
+        /// Identifier validation challenge type indicator for <see
+        /// cref="https://tools.ietf.org/html/draft-ietf-acme-acme-01#section-7.3"> TLS SNI </see>.
+        /// </summary>
+        public const string CHALLENGE_TYPE_SNI = "tls-sni-01";
+
         public const string WELL_KNOWN_LE = "LetsEncrypt";
 
         public const string WELL_KNOWN_LESTAGE = "LetsEncrypt-STAGING";
@@ -149,7 +168,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Certificates == null || v.Certificates.Count < 1)
                         throw new InvalidOperationException("No certificates found");
@@ -302,7 +320,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     AuthorizationState authzState = null;
                     var ii = new IdentifierInfo
@@ -349,7 +366,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Identifiers == null || v.Identifiers.Count < 1)
                         throw new InvalidOperationException("No identifiers found");
@@ -408,7 +424,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Identifiers == null || v.Identifiers.Count < 1)
                         throw new InvalidOperationException("No identifiers found");
@@ -472,7 +487,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Identifiers == null || v.Identifiers.Count < 1)
                         throw new InvalidOperationException("No identifiers found");
@@ -645,7 +659,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Identifiers == null || v.Identifiers.Count < 1)
                         throw new InvalidOperationException("No identifiers found");
@@ -781,7 +794,6 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
                     if (v.Certificates == null || v.Certificates.Count < 1)
                         throw new InvalidOperationException("No certificates found");
@@ -965,27 +977,7 @@ namespace Certify.ACMESharpCompat
                         throw new InvalidOperationException("No registrations found");
 
                     var ri = v.Registrations[0];
-                    var r = ri.Registration;
 
-                    /*  if (string.IsNullOrEmpty(certRef))
-                      {
-                          int seq = 0;
-                          WriteObject(v.Certificates.Values.Select(x => new
-                          {
-                              Seq = seq++,
-                              x.Id,
-                              x.Alias,
-                              x.Label,
-                              x.IdentifierDns,
-                              x.Thumbprint,
-                              x.SerialNumber,
-                              x.IssuerSerialNumber,
-                              x.CertificateRequest,
-                              x.CertificateRequest?.StatusCode,
-                          }), true);
-                      }
-                      else
-                      {*/
                     if (v.Certificates == null || v.Certificates.Count < 1)
                         throw new InvalidOperationException("No certificates found");
 
@@ -1081,9 +1073,64 @@ namespace Certify.ACMESharpCompat
                             }
                         }
                     }
+                }
+            }
+        }
 
-                    /*  WriteObject(ci);
-                  }*/
+        public static CertificateInfo RevokeCertificate(object certref, string vaultProfile = null)
+        {
+            lock (VaultManager.VAULT_LOCK)
+            {
+                using (var vlt = GetVault(vaultProfile))
+                {
+                    OpenVaultStorage(vlt);
+                    var v = vlt.LoadVault();
+
+                    if (v.Registrations == null || v.Registrations.Count < 1)
+                        throw new InvalidOperationException("No registrations found");
+
+                    var ri = v.Registrations[0];
+
+                    if (v.Certificates == null || v.Certificates.Count < 1)
+                        throw new InvalidOperationException("No certificates found");
+
+                    var ci = v.Certificates.Values.FirstOrDefault(c => c.Alias.Equals(certref) || c.Id.Equals(certref));
+                    if (ci == null)
+                        throw new Exception($"Unable to find a Certificate for the given reference '{certref}' (by id or alias)");
+
+                    if (ci.CertificateRequest == null)
+                        throw new Exception("Certificate has not been submitted yet; cannot revoke status");
+
+                    if (string.IsNullOrEmpty(ci.CertificateRequest.CertificateContent))
+                        throw new Exception("Certificate has not been issued; cannot revoke status");
+
+                    using (var c = ClientHelper.GetClient(v, ri))
+                    {
+                        c.Init();
+                        c.GetDirectory(true);
+
+                        try
+                        {
+                            c.RevokeCertificate(ci.CertificateRequest.CertificateContent);
+                            ci.RevokedAt = DateTime.Now;
+                        }
+                        catch (AcmeClient.AcmeProtocolException ax)
+                        {
+                            if (ax.Response.StatusCode == HttpStatusCode.Conflict)
+                            {
+                                // cert already revoked, update vault
+                                ci.RevokedAt = DateTime.Now;
+                            }
+                            else
+                            {
+                                throw;
+                            }
+                        }
+                    }
+
+                    vlt.SaveVault(v);
+
+                    return ci;
                 }
             }
         }

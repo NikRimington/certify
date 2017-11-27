@@ -1,22 +1,12 @@
-﻿using Certify.Management;
+using Certify.Management;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 
 namespace Certify.UI.Windows
 {
     /// <summary>
-    /// Interaction logic for Registration.xaml
+    /// Interaction logic for Registration.xaml 
     /// </summary>
     public partial class Registration
     {
@@ -34,30 +24,37 @@ namespace Certify.UI.Windows
 
             if (String.IsNullOrEmpty(email))
             {
-                MessageBox.Show("Please enter the email address you used when registering your key.");
+                MessageBox.Show(Certify.Locales.SR.Registration_NeedEmail);
                 return;
             }
 
             if (String.IsNullOrEmpty(key))
             {
-                MessageBox.Show("Please enter your license key.");
+                MessageBox.Show(Certify.Locales.SR.Registration_NeedKey);
                 return;
             }
 
-            var pluginManager = new PluginManager();
-            pluginManager.LoadPlugins();
+            ValidateKey.IsEnabled = false;
+            Mouse.OverrideCursor = Cursors.Wait;
 
-            if (pluginManager.LicensingManager != null)
+            var licensingManager = ViewModel.AppModel.AppViewModel.PluginManager?.LicensingManager;
+
+            if (licensingManager != null)
             {
-                var licensingManager = pluginManager.LicensingManager;
-
                 try
                 {
                     var validationResult = await licensingManager.Validate(productTypeId, email, key);
                     if (validationResult.IsValid)
                     {
-                        var installRegistration = await licensingManager.RegisterInstall(productTypeId, email, key, System.Environment.MachineName);
+                        var instance = new Models.Shared.RegisteredInstance
+                        {
+                            InstanceId = ViewModel.AppModel.AppViewModel.Preferences.InstanceId,
+                            AppVersion = new Management.Util().GetAppVersion().ToString()
+                        };
 
+                        var installRegistration = await licensingManager.RegisterInstall(productTypeId, email, key, instance);
+
+                        Mouse.OverrideCursor = Cursors.Arrow;
                         if (installRegistration.IsSuccess)
                         {
                             var settingsPath = Util.GetAppDataFolder();
@@ -71,6 +68,7 @@ namespace Certify.UI.Windows
                         }
                         else
                         {
+                            ValidateKey.IsEnabled = true;
                             MessageBox.Show(installRegistration.Message);
                         }
                     }
@@ -81,13 +79,16 @@ namespace Certify.UI.Windows
                 }
                 catch (Exception)
                 {
-                    MessageBox.Show("There was a problem trying to validate your license key. Please try again or contact support.");
+                    MessageBox.Show(Certify.Locales.SR.Registration_KeyValidationError);
                 }
             }
             else
             {
-                MessageBox.Show("There was a problem beginning the license validation process.");
+                MessageBox.Show(Certify.Locales.SR.Registration_UnableToVerify);
             }
+
+            ValidateKey.IsEnabled = true;
+            Mouse.OverrideCursor = Cursors.Arrow;
         }
 
         private void Cancel_Click(object sender, RoutedEventArgs e)

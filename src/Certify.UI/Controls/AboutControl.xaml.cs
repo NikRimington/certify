@@ -1,44 +1,37 @@
-﻿using Certify.Management;
+using Certify.Locales;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
 
 namespace Certify.UI.Controls
 {
     /// <summary>
-    /// Interaction logic for AboutControl.xaml
+    /// Interaction logic for AboutControl.xaml 
     /// </summary>
     public partial class AboutControl : UserControl
     {
-        protected Certify.UI.ViewModel.AppModel MainViewModel
-        {
-            get
-            {
-                return ViewModel.AppModel.AppViewModel;
-            }
-        }
+        protected Certify.UI.ViewModel.AppModel MainViewModel => ViewModel.AppModel.AppViewModel;
 
         public AboutControl()
         {
             InitializeComponent();
-
-            PopulateAppInfo();
         }
 
         private void PopulateAppInfo()
         {
-            this.lblAppVersion.Text = Core.Properties.Resources.AppName + " " + new Certify.Management.Util().GetAppVersion();
+            if (MainViewModel.IsServiceAvailable)
+            {
+                this.ServiceConnected.Foreground = System.Windows.Media.Brushes.DarkGreen;
+                this.ServiceConnected.Icon = FontAwesome.WPF.FontAwesomeIcon.Chain;
+            }
+            else
+            {
+                this.ServiceConnected.Foreground = System.Windows.Media.Brushes.Red;
+                this.ServiceConnected.Icon = FontAwesome.WPF.FontAwesomeIcon.ChainBroken;
+            }
+            this.lblAppVersion.Text = ConfigResources.AppName + " " + new Certify.Management.Util().GetAppVersion();
 
             if (this.MainViewModel.IsRegisteredVersion)
             {
@@ -48,25 +41,35 @@ namespace Certify.UI.Controls
                 this.lblRegistrationType.Text = "Registered Version";
                 this.lblRegistrationDetails.Text = "";
             }
+
+            // add details of current languages translator team
+            if (!string.IsNullOrEmpty(SR.LanguageAuthor) && !this.creditLibs.Text.Contains(SR.About_LanguageTranslator))
+            {
+                this.creditLibs.Text += Environment.NewLine + SR.About_LanguageTranslator + SR.LanguageAuthor;
+            }
         }
 
         private async void UpdateCheck_Click(object sender, RoutedEventArgs e)
         {
+            Mouse.OverrideCursor = Cursors.Wait;
             await PerformCheckForUpdates(silent: false);
+            Mouse.OverrideCursor = Cursors.Arrow;
         }
 
         private async Task PerformCheckForUpdates(bool silent)
         {
-            var updateCheck = await new Util().CheckForUpdates();
+            var updateCheck = await new Management.Util().CheckForUpdates();
 
             if (updateCheck != null)
             {
+                MainViewModel.UpdateCheckResult = updateCheck;
                 if (updateCheck.IsNewerVersion)
                 {
-                    var gotoDownload = MessageBox.Show(updateCheck.Message.Body + "\r\nVisit download page now?", Core.Properties.Resources.AppName, MessageBoxButton.YesNo);
+                    MainViewModel.IsUpdateAvailable = true;
+                    var gotoDownload = MessageBox.Show(updateCheck.Message.Body + "\r\nVisit download page now?", ConfigResources.AppName, MessageBoxButton.YesNo);
                     if (gotoDownload == MessageBoxResult.Yes)
                     {
-                        System.Diagnostics.ProcessStartInfo sInfo = new System.Diagnostics.ProcessStartInfo(Core.Properties.Resources.AppWebsiteURL);
+                        System.Diagnostics.ProcessStartInfo sInfo = new System.Diagnostics.ProcessStartInfo(ConfigResources.AppWebsiteURL);
                         System.Diagnostics.Process.Start(sInfo);
                     }
                 }
@@ -74,7 +77,7 @@ namespace Certify.UI.Controls
                 {
                     if (!silent)
                     {
-                        MessageBox.Show(Core.Properties.Resources.UpdateCheckLatestVersion, Core.Properties.Resources.AppName);
+                        MessageBox.Show(ConfigResources.UpdateCheckLatestVersion, ConfigResources.AppName);
                     }
                 }
             }
@@ -108,6 +111,11 @@ namespace Certify.UI.Controls
         {
             var d = new Windows.Feedback("", false);
             d.ShowDialog();
+        }
+
+        private void UserControl_Loaded(object sender, RoutedEventArgs e)
+        {
+            PopulateAppInfo();
         }
     }
 }

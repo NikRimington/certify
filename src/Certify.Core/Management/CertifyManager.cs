@@ -1,23 +1,99 @@
-﻿using Certify.Models;
-
+using Certify.Locales;
+using Certify.Models;
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace Certify.Management
 {
-    public class CertifyManager
+    public interface ICertifyManager
+    {
+        Task<bool> IsServerTypeAvailable(StandardServerTypes serverType);
+
+        Task<Version> GetServerTypeVersion(StandardServerTypes serverType);
+
+        Task<bool> LoadSettingsAsync(bool skipIfLoaded);
+
+        Task<ManagedSite> GetManagedSite(string id);
+
+        Task<List<ManagedSite>> GetManagedSites(ManagedSiteFilter filter = null);
+
+        Task<ManagedSite> UpdateManagedSite(ManagedSite site);
+
+        Task DeleteManagedSite(string id);
+
+        List<RegistrationItem> GetContactRegistrations();
+
+        string GetPrimaryContactEmail();
+
+        List<IdentifierItem> GetDomainIdentifiers();
+
+        List<CertificateItem> GetCertificates();
+
+        void PerformVaultCleanup();
+
+        bool HasRegisteredContacts();
+
+        Task<APIResult> TestChallenge(ManagedSite managedSite, bool isPreviewMode);
+
+        Task<APIResult> RevokeCertificate(ManagedSite managedSite);
+
+        Task<CertificateRequestResult> PerformDummyCertificateRequest(ManagedSite managedSite, IProgress<RequestProgressState> progress = null);
+
+        Task<bool> AddRegisteredContact(ContactRegistration reg);
+
+        void RemoveExtraContacts(string email);
+
+        void RemoveAllContacts();
+
+        List<SiteBindingItem> GetPrimaryWebSites(bool ignoreStoppedSites);
+
+        string GetAcmeSummary();
+
+        string GetVaultSummary();
+
+        void BeginTrackingProgress(RequestProgressState state);
+
+        Task<CertificateRequestResult> ReapplyCertificateBindings(ManagedSite managedSite, IProgress<RequestProgressState> progress = null);
+
+        Task<CertificateRequestResult> PerformCertificateRequest(ManagedSite managedSite, IProgress<RequestProgressState> progress = null);
+
+        List<DomainOption> GetDomainOptionsFromSite(string siteId);
+
+        List<ManagedSite> ImportManagedSitesFromVault(bool mergeSitesAsSan = false);
+
+        Task<List<CertificateRequestResult>> PerformRenewalAllManagedSites(bool autoRenewalOnly = true, Dictionary<string, Progress<RequestProgressState>> progressTrackers = null);
+
+        Task<List<ManagedSite>> PreviewManagedSites(StandardServerTypes serverType);
+
+        RequestProgressState GetRequestProgressState(string managedSiteId);
+
+        Task<bool> PerformPeriodicTasks();
+
+        event Action<RequestProgressState> OnRequestProgressStateUpdated;
+
+        event Action<ManagedSite> OnManagedSiteUpdated;
+    }
+
+    public class CertifyManager : ICertifyManager
     {
         private ItemManager _siteManager = null;
         private IACMEClientProvider _acmeClientProvider = null;
         private IVaultProvider _vaultProvider = null;
         private IISManager _iisManager = null;
+        public bool IsSingleInstanceMode { get; set; } = true; //if true we make assumptions about how often to load settings etc
+        private ObservableCollection<RequestProgressState> _progressResults { get; set; }
 
-        private const string SCHEDULED_TASK_NAME = "Certify Maintenance Task";
-        private const string SCHEDULED_TASK_EXE = "certify.exe";
-        private const string SCHEDULED_TASK_ARGS = "renew";
+        public event Action<RequestProgressState> OnRequestProgressStateUpdated;
+
+        public event Action<ManagedSite> OnManagedSiteUpdated;
+
+        private bool _isRenewAllInProgress { get; set; }
+
+        private PluginManager PluginManager { get; set; }
 
         public CertifyManager()
         {
@@ -27,49 +103,48 @@ namespace Certify.Management
             // ACME Sharp is both a vault (config storage) provider and ACME client provider
             _acmeClientProvider = acmeSharp;
             _vaultProvider = acmeSharp;
-
             _siteManager = new ItemManager();
-            _siteManager.LoadSettings();
-
             _iisManager = new IISManager();
+
+            _progressResults = new ObservableCollection<RequestProgressState>();
+
+            PluginManager = new PluginManager();
+            PluginManager.LoadPlugins();
         }
 
-        public bool IsIISAvailable
+        public void BeginTrackingProgress(RequestProgressState state)
         {
-            get
+            var existing = _progressResults.FirstOrDefault(p => p.ManagedItem.Id == state.ManagedItem.Id);
+            if (existing != null)
             {
-                if (_iisManager != null && _iisManager.IsIISAvailable)
-                {
-                    return true;
-                }
-                else
-                {
-                    return false;
-                }
+                _progressResults.Remove(existing);
             }
+            _progressResults.Add(state);
         }
 
-        /// <summary>
-        /// Check if we have one or more managed sites setup 
-        /// </summary>
-        public bool HasManagedSites
+        public async Task<bool> LoadSettingsAsync(bool skipIfLoaded)
         {
-            get
-            {
-                if (_siteManager.GetManagedSites().Count > 0)
-                {
-                    return true;
-                }
-                else
-                {
-                    return false;
-                }
-            }
+            await _siteManager.LoadAllManagedItems(skipIfLoaded);
+            return true;
         }
 
-        public List<ManagedSite> GetManagedSites()
+        public async Task<ManagedSite> GetManagedSite(string id)
         {
-            return this._siteManager.GetManagedSites();
+            return await _siteManager.GetManagedSite(id);
+        }
+
+        public async Task<ManagedSite> UpdateManagedSite(ManagedSite site)
+        {
+            site = await _siteManager.UpdatedManagedSite(site);
+
+            // report request state to status hub clients
+            OnManagedSiteUpdated?.Invoke(site);
+            return site;
+        }
+
+        public async Task<List<ManagedSite>> GetManagedSites(ManagedSiteFilter filter = null)
+        {
+            return await this._siteManager.GetManagedSites(filter, true);
         }
 
         public List<RegistrationItem> GetContactRegistrations()
@@ -77,7 +152,7 @@ namespace Certify.Management
             return _vaultProvider.GetContactRegistrations();
         }
 
-        public List<IdentifierItem> GeDomainIdentifiers()
+        public List<IdentifierItem> GetDomainIdentifiers()
         {
             return _vaultProvider.GetDomainIdentifiers();
         }
@@ -87,20 +162,38 @@ namespace Certify.Management
             return _vaultProvider.GetCertificates();
         }
 
-        public void SetManagedSites(List<ManagedSite> managedSites)
+        public void PerformVaultCleanup()
         {
-            this._siteManager.UpdatedManagedSites(managedSites);
-        }
-
-        public void SaveManagedSites(List<ManagedSite> managedSites)
-        {
-            this._siteManager.UpdatedManagedSites(managedSites);
-            this._siteManager.StoreSettings();
+            _vaultProvider.PerformVaultCleanup();
         }
 
         public bool HasRegisteredContacts()
         {
             return _vaultProvider.HasRegisteredContacts();
+        }
+
+        /// <summary>
+        /// Perform set of test challenges and configuration checks to determine if site appears
+        /// valid for certificate requests
+        /// </summary>
+        /// <param name="managedSite"> managed site to check </param>
+        /// <param name="isPreviewMode">
+        /// If true, perform full set of checks (DNS etc), if false performs minimal/basic checks
+        /// </param>
+        /// <returns></returns>
+        public async Task<APIResult> TestChallenge(ManagedSite managedSite, bool isPreviewMode)
+        {
+            return await _vaultProvider.TestChallengeResponse(_iisManager, managedSite, isPreviewMode);
+        }
+
+        public async Task<APIResult> RevokeCertificate(ManagedSite managedSite)
+        {
+            var result = await _vaultProvider.RevokeCertificate(managedSite);
+            if (result.IsOK)
+            {
+                managedSite.CertificateRevoked = true;
+            }
+            return result;
         }
 
         /// <summary>
@@ -112,33 +205,50 @@ namespace Certify.Management
         /// <returns></returns>
         public async Task<CertificateRequestResult> PerformDummyCertificateRequest(ManagedSite managedSite, IProgress<RequestProgressState> progress = null)
         {
-            return await Task<CertificateRequestResult>.Run<CertificateRequestResult>(() =>
+            return await Task<CertificateRequestResult>.Run<CertificateRequestResult>(async () =>
             {
                 for (var i = 0; i < 6; i++)
                 {
-                    if (progress != null) progress.Report(new RequestProgressState { CurrentState = RequestState.Running, Message = "Step " + i });
-
+                    ReportProgress(progress, new RequestProgressState(RequestState.Running, "Step " + i, managedSite));
                     var time = new Random().Next(2000);
-                    System.Threading.Thread.Sleep(time);
+                    await Task.Delay(time);
                 }
-                if (progress != null) progress.Report(new RequestProgressState { CurrentState = RequestState.Success, Message = "Finish" });
-                System.Threading.Thread.Sleep(500);
+
+                await Task.Delay(500);
+
+                ReportProgress(progress, new RequestProgressState(RequestState.Success, CoreSR.Finish, managedSite));
+
                 return new CertificateRequestResult { };
             });
         }
 
-        public void DeleteManagedSite(string id)
+        public async Task DeleteManagedSite(string id)
         {
-            var site = _siteManager.GetManagedSite(id);
+            var site = await _siteManager.GetManagedSite(id);
             if (site != null)
             {
-                this._siteManager.DeleteManagedSite(site);
+                await this._siteManager.DeleteManagedSite(site);
             }
         }
 
-        public bool AddRegisteredContact(ContactRegistration reg)
+        public async Task<bool> AddRegisteredContact(ContactRegistration reg)
         {
-            return _acmeClientProvider.AddNewRegistrationAndAcceptTOS(reg.EmailAddress);
+            // in practise only one registered contact is used, so remove alternatives to avoid cert
+            // processing picking up the wrong one
+            RemoveAllContacts();
+
+            // now attempt to register the new contact
+            if (reg.AgreedToTermsAndConditions)
+            {
+                // FIXME: not fully async
+
+                return await Task.FromResult(_acmeClientProvider.AddNewRegistrationAndAcceptTOS(reg.EmailAddress));
+            }
+            else
+            {
+                // did not agree to terms
+                return false;
+            }
         }
 
         /// <summary>
@@ -158,6 +268,15 @@ namespace Certify.Management
             }
         }
 
+        public void RemoveAllContacts()
+        {
+            var regList = _vaultProvider.GetContactRegistrations();
+            foreach (var reg in regList)
+            {
+                _vaultProvider.DeleteContactRegistration(reg.Id);
+            }
+        }
+
         public List<SiteBindingItem> GetPrimaryWebSites(bool ignoreStoppedSites)
         {
             return _iisManager.GetPrimarySites(ignoreStoppedSites);
@@ -173,23 +292,16 @@ namespace Certify.Management
             return _vaultProvider.GetVaultSummary();
         }
 
-        private void ReportProgress(IProgress<RequestProgressState> progress, string msg, string logManagedSiteId = null)
-        {
-            if (progress != null) progress.Report(new RequestProgressState { Message = msg });
-
-            if (logManagedSiteId != null)
-            {
-                LogMessage(logManagedSiteId, msg, LogItemType.GeneralWarning);
-            }
-        }
-
-        private void ReportProgress(IProgress<RequestProgressState> progress, RequestProgressState state, string logManagedSiteId = null)
+        private void ReportProgress(IProgress<RequestProgressState> progress, RequestProgressState state, bool logThisEvent = true)
         {
             if (progress != null) progress.Report(state);
 
-            if (logManagedSiteId != null)
+            // report request state to staus hub clients
+            OnRequestProgressStateUpdated?.Invoke(state);
+
+            if (state.ManagedItem != null && logThisEvent)
             {
-                LogMessage(logManagedSiteId, state.Message, LogItemType.GeneralWarning);
+                LogMessage(state.ManagedItem.Id, state.Message, LogItemType.GeneralWarning);
             }
         }
 
@@ -203,9 +315,55 @@ namespace Certify.Management
             });
         }
 
+        public async Task<CertificateRequestResult> ReapplyCertificateBindings(ManagedSite managedSite, IProgress<RequestProgressState> progress = null)
+        {
+            var result = new CertificateRequestResult { ManagedItem = managedSite, IsSuccess = false, Message = "" };
+            var config = managedSite.RequestConfig;
+            var pfxPath = managedSite.CertificatePath;
+
+            if (managedSite.ItemType == ManagedItemType.SSL_LetsEncrypt_LocalIIS)
+            {
+                ReportProgress(progress, new RequestProgressState(RequestState.Running, CoreSR.CertifyManager_AutoBinding, managedSite));
+
+                // Install certificate into certificate store and bind to IIS site
+                if (await _iisManager.InstallCertForRequest(managedSite, pfxPath, cleanupCertStore: true))
+                {
+                    //all done
+                    LogMessage(managedSite.Id, CoreSR.CertifyManager_CompleteRequestAndUpdateBinding, LogItemType.CertificateRequestSuccessful);
+
+                    await UpdateManagedSiteStatus(managedSite, RequestState.Success);
+
+                    result.IsSuccess = true;
+                    result.Message = string.Format(CoreSR.CertifyManager_CertificateInstalledAndBindingUpdated, config.PrimaryDomain);
+                    ReportProgress(progress, new RequestProgressState(RequestState.Success, result.Message, managedSite));
+                }
+                else
+                {
+                    // something broke
+                    result.Message = string.Format(CoreSR.CertifyManager_CertificateInstallFailed, pfxPath);
+                    await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
+
+                    LogMessage(managedSite.Id, result.Message, LogItemType.GeneralError);
+                }
+            }
+            return result;
+        }
+
         public async Task<CertificateRequestResult> PerformCertificateRequest(ManagedSite managedSite, IProgress<RequestProgressState> progress = null)
         {
-            // FIXME: refactor into different concerns, there's way to much being done here
+            // FIXME: refactor into different concerns, there's way too much being done here
+            if (managedSite.RequestConfig.ChallengeType == ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_HTTP && managedSite.RequestConfig.PerformExtensionlessConfigChecks)
+            {
+                ReportProgress(progress,
+                    new RequestProgressState(RequestState.Running, Certify.Locales.CoreSR.CertifyManager_PerformingConfigTests, managedSite)
+                );
+
+                var testResult = await TestChallenge(managedSite, isPreviewMode: false);
+                if (!testResult.IsOK)
+                {
+                    return new CertificateRequestResult { ManagedItem = managedSite, IsSuccess = false, Message = String.Join("; ", testResult.FailedItemSummary), Result = testResult.Result };
+                }
+            }
 
             return await Task.Run(async () =>
             {
@@ -233,22 +391,24 @@ namespace Certify.Management
                     if (result.Abort)
                     {
                         LogMessage(managedSite.Id, $"Certificate Request Aborted: {managedSite.Name}");
-                        result.Message = "Certificate Request was aborted by PS script";
+                        result.Message = Certify.Locales.CoreSR.CertificateRequestWasAbortedByPSScript;
                         goto CertRequestAborted;
                     }
 
                     LogMessage(managedSite.Id, $"Beginning Certificate Request Process: {managedSite.Name}");
 
                     //enable or disable EFS flag on private key certs based on preference
-                    if (Properties.Settings.Default.EnableEFS)
+                    if (CoreAppSettings.Current.EnableEFS)
                     {
                         _vaultProvider.EnableSensitiveFileEncryption();
                     }
 
                     //primary domain and each subject alternative name must now be registered as an identifier with LE and validated
-                    ReportProgress(progress, new RequestProgressState { IsRunning = true, CurrentState = RequestState.Running, Message = "Registering Domain Identifiers" });
+                    ReportProgress(progress,
+                        new RequestProgressState(RequestState.Running, CoreSR.CertifyManager_RegisterDomainIdentity, managedSite)
+                    );
 
-                    await Task.Delay(200); //allow UI update, we should we using async calls instead
+                    //await Task.Delay(200); //allow UI update, we should we using async calls instead
 
                     List<string> allDomains = new List<string> { config.PrimaryDomain };
 
@@ -257,10 +417,12 @@ namespace Certify.Management
                     // begin by assuming all identifiers are valid
                     bool allIdentifiersValidated = true;
 
-                    if (config.ChallengeType == null) config.ChallengeType = "http-01";
+                    if (config.ChallengeType == null) config.ChallengeType = ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_HTTP;
 
                     List<PendingAuthorization> identifierAuthorizations = new List<PendingAuthorization>();
                     var distinctDomains = allDomains.Distinct();
+
+                    string failureSummaryMessage = null;
 
                     // perform validation process for each domain
                     foreach (var domain in distinctDomains)
@@ -269,7 +431,10 @@ namespace Certify.Management
                         var domainIdentifierId = _vaultProvider.ComputeDomainIdentifierId(domain);
 
                         LogMessage(managedSite.Id, $"Attempting Domain Validation: {domain}", LogItemType.CertificateRequestStarted);
-                        ReportProgress(progress, $"Registering and Validating {domain} ");
+
+                        ReportProgress(progress,
+                            new RequestProgressState(RequestState.Running, string.Format(Certify.Locales.CoreSR.CertifyManager_RegisteringAndValidatingX0, domain), managedSite)
+                            );
 
                         //TODO: make operations async and yield IO of vault
                         /*var authorization = await Task.Run(() =>
@@ -279,7 +444,7 @@ namespace Certify.Management
 
                         // begin authorization by registering the domain identifier. This may return
                         // an already validated authorization or we may still have to complete the
-                        // authorization challenge
+                        // authorization challenge. When rate limits are encountered, this step may fail.
                         var authorization = _vaultProvider.BeginRegistrationAndValidation(config, domainIdentifierId, challengeType: config.ChallengeType, domain: domain);
 
                         if (authorization != null && authorization.Identifier != null)
@@ -290,44 +455,87 @@ namespace Certify.Management
                             {
                                 if (managedSite.ItemType == ManagedItemType.SSL_LetsEncrypt_LocalIIS)
                                 {
-                                    ReportProgress(progress, $"Performing Challenge Response via IIS: {domain} ");
+                                    ReportProgress(progress,
+                                        new RequestProgressState(
+                                            RequestState.Running,
+                                            string.Format(Certify.Locales.CoreSR.CertifyManager_PerformingChallengeResponseViaIISX0, domain),
+                                            managedSite
+                                        )
+                                    );
 
-                                    //ask LE to check our answer to their authorization challenge (http), LE will then attempt to fetch our answer, if all accessible and correct (authorized) LE will then allow us to request a certificate
-                                    //prepare IIS with answer for the LE challenege
+                                    // ask LE to check our answer to their authorization challenge
+                                    // (http-01 or tls-sni-01), LE will then attempt to fetch our
+                                    // answer, if all accessible and correct (authorized) LE will
+                                    // then allow us to request a certificate
                                     authorization = _vaultProvider.PerformIISAutomatedChallengeResponse(_iisManager, managedSite, authorization);
 
-                                    //if we attempted extensionless config checks, report any errors
-                                    if (config.PerformAutoConfig && !authorization.ExtensionlessConfigCheckedOK)
+                                    // pass authorization log items onto main log
+                                    /*authorization.LogItems?.ForEach((msg) =>
                                     {
-                                        LogMessage(managedSite.Id, $"Failed prerequisite configuration checks ({ managedSite.ItemType })", LogItemType.CertficateRequestFailed);
+                                        if (msg != null) LogMessage(managedSite.Id, msg, LogItemType.GeneralInfo);
+                                    });*/
 
-                                        _siteManager.StoreSettings();
+                                    if ((config.ChallengeType == ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_HTTP && config.PerformExtensionlessConfigChecks && !authorization.ExtensionlessConfigCheckedOK) ||
+                                        (config.ChallengeType == ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_SNI && config.PerformTlsSniBindingConfigChecks && !authorization.TlsSniConfigCheckedOK))
+                                    {
+                                        //if we failed the config checks, report any errors
+                                        var msg = string.Format(CoreSR.CertifyManager_FailedPrerequisiteCheck, managedSite.ItemType);
+                                        LogMessage(managedSite.Id, msg, LogItemType.CertficateRequestFailed);
+                                        result.Message = msg;
 
-                                        result.Message = "Automated configuration checks failed. Authorizations will not be able to complete.\nCheck you have http bindings for your site and ensure you can browse to http://" + domain + "/.well-known/acme-challenge/configcheck before proceeding.";
-                                        ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Error, Message = result.Message, Result = result });
+                                        // TODO: should this be a status save?
+
+                                        if (config.ChallengeType == ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_HTTP)
+                                        {
+                                            result.Message = string.Format(CoreSR.CertifyManager_AutomateConfigurationCheckFailed_HTTP, domain);
+                                        }
+
+                                        if (config.ChallengeType == ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_SNI)
+                                        {
+                                            result.Message = Certify.Locales.CoreSR.CertifyManager_AutomateConfigurationCheckFailed_SNI;
+                                        }
+
+                                        ReportProgress(progress, new RequestProgressState(RequestState.Error, result.Message, managedSite) { Result = result });
+
+                                        await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
 
                                         break;
                                     }
                                     else
                                     {
-                                        ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Running, Message = $"Requesting Validation from Let's Encrypt: {domain}" });
+                                        ReportProgress(progress, new RequestProgressState(RequestState.Running, string.Format(CoreSR.CertifyManager_ReqestValidationFromLetsEncrypt, domain), managedSite));
 
-                                        //ask LE to validate our challenge response
-                                        _vaultProvider.SubmitChallenge(domainIdentifierId, config.ChallengeType);
-
-                                        bool identifierValidated = _vaultProvider.CompleteIdentifierValidationProcess(authorization.Identifier.Alias);
-
-                                        if (!identifierValidated)
+                                        try
                                         {
-                                            ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Error, Message = "Domain validation failed: " + domain }, managedSite.Id);
+                                            //ask LE to validate our challenge response
+                                            _vaultProvider.SubmitChallenge(domainIdentifierId, config.ChallengeType);
 
-                                            allIdentifiersValidated = false;
+                                            bool identifierValidated = _vaultProvider.CompleteIdentifierValidationProcess(authorization.Identifier.Alias);
+
+                                            if (!identifierValidated)
+                                            {
+                                                var identifierInfo = _vaultProvider.GetDomainIdentifier(domain);
+                                                var errorMsg = identifierInfo?.ValidationError;
+                                                var errorType = identifierInfo?.ValidationErrorType;
+
+                                                failureSummaryMessage = string.Format(CoreSR.CertifyManager_DomainValidationFailed, domain, errorMsg);
+                                                ReportProgress(progress, new RequestProgressState(RequestState.Error, failureSummaryMessage, managedSite));
+                                                await UpdateManagedSiteStatus(managedSite, RequestState.Error, failureSummaryMessage);
+                                                allIdentifiersValidated = false;
+                                            }
+                                            else
+                                            {
+                                                ReportProgress(progress, new RequestProgressState(RequestState.Running, string.Format(CoreSR.CertifyManager_DomainValidationCompleted, domain), managedSite));
+
+                                                identifierAuthorizations.Add(authorization);
+                                            }
                                         }
-                                        else
+                                        finally
                                         {
-                                            ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Running, Message = "Domain validation completed: " + domain }, managedSite.Id);
-
-                                            identifierAuthorizations.Add(authorization);
+                                            // clean up challenge answers
+                                            // (.well-known/acme-challenge/* files for http-01 or iis
+                                            // bindings for tls-sni-01)
+                                            authorization.Cleanup();
                                         }
                                     }
                                 }
@@ -337,13 +545,22 @@ namespace Certify.Management
                                 // we already have a completed authorization, check it's valid
                                 if (authorization.Identifier.Status == "valid")
                                 {
-                                    LogMessage(managedSite.Id, $"Domain already has current authorization, skipping verification: { domain }");
+                                    LogMessage(managedSite.Id, string.Format(CoreSR.CertifyManager_DomainValidationSkipVerifed, domain));
 
                                     identifierAuthorizations.Add(new PendingAuthorization { Identifier = authorization.Identifier });
                                 }
                                 else
                                 {
-                                    LogMessage(managedSite.Id, $"Domain authorization failed : { domain } ");
+                                    var errorMsg = "";
+                                    if (authorization?.Identifier != null)
+                                    {
+                                        errorMsg = authorization.Identifier.ValidationError;
+                                        var errorType = authorization.Identifier.ValidationErrorType;
+                                    }
+
+                                    failureSummaryMessage = $"Domain validation failed: {domain} \r\n{errorMsg}";
+
+                                    LogMessage(managedSite.Id, string.Format(CoreSR.CertifyManager_DomainValidationFailed, domain));
 
                                     allIdentifiersValidated = false;
                                 }
@@ -351,8 +568,22 @@ namespace Certify.Management
                         }
                         else
                         {
-                            // could not begin authorization
-                            LogMessage(managedSite.Id, $"Could not begin authorization for domain with Let's Encrypt: { domain } ");
+                            // could not begin authorization : TODO: pass error from authorization
+                            // step to UI
+
+                            var lastActionLogItem = _vaultProvider.GetLastActionLogItem();
+                            var actionLogMsg = "";
+                            if (lastActionLogItem != null)
+                            {
+                                actionLogMsg = lastActionLogItem.ToString();
+                            }
+
+                            LogMessage(managedSite.Id, $"Could not begin authorization for domain with Let's Encrypt: { domain } {(authorization?.AuthorizationError != null ? authorization?.AuthorizationError : "Could not register domain identifier")} - {actionLogMsg}");
+
+                            /*if (authorization != null && authorization.LogItems != null)
+                            {
+                                LogMessage(managedSite.Id, authorization.LogItems);
+                            }*/
                             allIdentifiersValidated = false;
                         }
 
@@ -371,7 +602,7 @@ namespace Certify.Management
                         string primaryDnsIdentifier = identifierAuthorizations.First().Identifier.Alias;
                         string[] alternativeDnsIdentifiers = identifierAuthorizations.Select(i => i.Identifier.Alias).ToArray();
 
-                        ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Running, Message = "Requesting Certificate via Lets Encrypt" }, managedSite.Id);
+                        ReportProgress(progress, new RequestProgressState(RequestState.Running, CoreSR.CertifyManager_RequestCertificate, managedSite));
 
                         // Perform CSR request
                         // FIXME: make call async
@@ -379,49 +610,53 @@ namespace Certify.Management
 
                         if (certRequestResult.IsSuccess)
                         {
-                            ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Success, Message = "Completed Certificate Request." }, managedSite.Id);
+                            ReportProgress(progress, new RequestProgressState(RequestState.Success, CoreSR.CertifyManager_CompleteRequest, managedSite));
 
                             string pfxPath = certRequestResult.Result.ToString();
 
                             // update managed site summary
                             try
                             {
-                                var certInfo = new CertificateManager().GetCertificate(pfxPath);
+                                var certInfo = CertificateManager.LoadCertificate(pfxPath);
                                 managedSite.DateStart = certInfo.NotBefore;
                                 managedSite.DateExpiry = certInfo.NotAfter;
                                 managedSite.DateRenewed = DateTime.Now;
 
                                 managedSite.CertificatePath = pfxPath;
+                                managedSite.CertificateRevoked = false;
 
                                 //ensure certificate contains all the requested domains
-                                var subjectNames = certInfo.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.UpnName, false);
+                                //var subjectNames = certInfo.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.UpnName, false);
 
-                                LogMessage(managedSite.Id, "New certificate contains following domains: " + subjectNames, LogItemType.GeneralInfo);
+                                //FIXME: LogMessage(managedSite.Id, "New certificate contains following domains: " + subjectNames, LogItemType.GeneralInfo);
                             }
                             catch (Exception)
                             {
                                 LogMessage(managedSite.Id, "Failed to parse certificate dates", LogItemType.GeneralError);
                             }
 
-                            if (managedSite.ItemType == ManagedItemType.SSL_LetsEncrypt_LocalIIS && config.PerformAutomatedCertBinding)
+                            if (managedSite.ItemType == ManagedItemType.SSL_LetsEncrypt_LocalIIS)
                             {
-                                ReportProgress(progress, new RequestProgressState { CurrentState = RequestState.Running, Message = "Performing Automated Certificate Binding" });
+                                ReportProgress(progress, new RequestProgressState(RequestState.Running, CoreSR.CertifyManager_AutoBinding, managedSite));
 
                                 // Install certificate into certificate store and bind to IIS site
-                                if (_iisManager.InstallCertForRequest(managedSite, pfxPath, cleanupCertStore: true))
+                                if (await _iisManager.InstallCertForRequest(managedSite, pfxPath, cleanupCertStore: true))
                                 {
                                     //all done
-                                    LogMessage(managedSite.Id, "Completed certificate request and automated bindings update (IIS)", LogItemType.CertificateRequestSuccessful);
+                                    LogMessage(managedSite.Id, CoreSR.CertifyManager_CompleteRequestAndUpdateBinding, LogItemType.CertificateRequestSuccessful);
 
-                                    _siteManager.UpdatedManagedSite(managedSite);
+                                    await UpdateManagedSiteStatus(managedSite, RequestState.Success);
 
                                     result.IsSuccess = true;
-                                    result.Message = $"Certificate installed and SSL bindings updated for {config.PrimaryDomain }";
-                                    ReportProgress(progress, new RequestProgressState { IsRunning = false, CurrentState = RequestState.Success, Message = result.Message });
+                                    result.Message = string.Format(CoreSR.CertifyManager_CertificateInstalledAndBindingUpdated, config.PrimaryDomain);
+                                    ReportProgress(progress, new RequestProgressState(RequestState.Success, result.Message, managedSite));
                                 }
                                 else
                                 {
-                                    result.Message = $"An error occurred installing the certificate. Certificate file may not be valid: {pfxPath}";
+                                    // something broke
+                                    result.Message = string.Format(CoreSR.CertifyManager_CertificateInstallFailed, pfxPath);
+                                    await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
+
                                     LogMessage(managedSite.Id, result.Message, LogItemType.GeneralError);
                                 }
                             }
@@ -429,23 +664,32 @@ namespace Certify.Management
                             {
                                 //user has opted for manual binding of certificate
 
-                                _siteManager.UpdatedManagedSite(managedSite);
-
                                 result.IsSuccess = true;
-                                result.Message = $"Certificate created ready for manual binding: {pfxPath}";
+                                result.Message = string.Format(CoreSR.CertifyManager_CertificateCreatedForBinding, pfxPath);
                                 LogMessage(managedSite.Id, result.Message, LogItemType.CertificateRequestSuccessful);
+                                await UpdateManagedSiteStatus(managedSite, RequestState.Success, result.Message);
+                                ReportProgress(progress, new RequestProgressState(RequestState.Success, result.Message, managedSite));
                             }
                         }
                         else
                         {
-                            result.Message = $"The Let's Encrypt service did not issue a valid certificate in the time allowed. {(certRequestResult.ErrorMessage ?? "")}";
+                            // certificate request failed
+
+                            result.Message = string.Format(CoreSR.CertifyManager_LetsEncryptServiceTimeout, certRequestResult.ErrorMessage ?? "");
+                            await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
                             LogMessage(managedSite.Id, result.Message, LogItemType.CertficateRequestFailed);
+                            ReportProgress(progress, new RequestProgressState(RequestState.Error, result.Message, managedSite));
                         }
                     }
                     else
                     {
-                        result.Message = "Validation of the required challenges did not complete successfully. Please ensure all domains to be referenced in the Certificate can be used to access this site without redirection. ";
+                        //failed to validate all identifiers
+                        result.Message = string.Format(CoreSR.CertifyManager_ValidationForChallengeNotSuccess, (failureSummaryMessage != null ? failureSummaryMessage : ""));
+
+                        await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
+
                         LogMessage(managedSite.Id, result.Message, LogItemType.CertficateRequestFailed);
+                        ReportProgress(progress, new RequestProgressState(RequestState.Error, result.Message, managedSite));
                     }
 
                     // Goto label for aborted certificate request
@@ -453,30 +697,84 @@ namespace Certify.Management
                 }
                 catch (Exception exp)
                 {
-                    result.IsSuccess = false;
-                    result.Message = managedSite.Name + ": Request failed - " + exp.Message + " " + exp.ToString();
-                    LogMessage(managedSite.Id, result.Message, LogItemType.CertficateRequestFailed);
+                    // overall exception thrown during process
 
+                    result.IsSuccess = false;
+                    result.Message = string.Format(Certify.Locales.CoreSR.CertifyManager_RequestFailed, managedSite.Name, exp.Message, exp);
+                    LogMessage(managedSite.Id, result.Message, LogItemType.CertficateRequestFailed);
+                    ReportProgress(progress, new RequestProgressState(RequestState.Error, result.Message, managedSite));
+
+                    await UpdateManagedSiteStatus(managedSite, RequestState.Error, result.Message);
+
+                    //LogMessage(managedSite.Id, String.Join("\r\n", _vaultProvider.GetActionSummary())); FIXME: needs to be filtered in managed site
                     System.Diagnostics.Debug.WriteLine(exp.ToString());
                 }
                 finally
                 {
-                    // if the request was not aborted, run post-request script, if set
-                    if (!result.Abort && !string.IsNullOrEmpty(config.PostRequestPowerShellScript))
+                    // if the request was not aborted, perform post-request actions
+                    if (!result.Abort)
                     {
-                        try
+                        // run post-request script, if set
+                        if (!string.IsNullOrEmpty(config.PostRequestPowerShellScript))
                         {
-                            string scriptOutput = await PowerShellManager.RunScript(result, config.PostRequestPowerShellScript);
-                            LogMessage(managedSite.Id, $"Post-Request Script output:\n{scriptOutput}");
+                            try
+                            {
+                                string scriptOutput = await PowerShellManager.RunScript(result, config.PostRequestPowerShellScript);
+                                LogMessage(managedSite.Id, $"Post-Request Script output:\n{scriptOutput}");
+                            }
+                            catch (Exception ex)
+                            {
+                                LogMessage(managedSite.Id, $"Post-Request Script error: {ex.Message}");
+                            }
                         }
-                        catch (Exception ex)
+                        // run webhook triggers, if set
+                        if ((config.WebhookTrigger == Webhook.ON_SUCCESS && result.IsSuccess) ||
+                    (config.WebhookTrigger == Webhook.ON_ERROR && !result.IsSuccess) ||
+                    (config.WebhookTrigger == Webhook.ON_SUCCESS_OR_ERROR))
                         {
-                            LogMessage(managedSite.Id, $"Post-Request Script error:\n{ex.Message}");
+                            try
+                            {
+                                var (success, code) = await Webhook.SendRequest(config, result.IsSuccess);
+                                LogMessage(managedSite.Id, $"Webhook invoked: Url: {config.WebhookUrl}, Success: {success}, StatusCode: {code}");
+                            }
+                            catch (Exception ex)
+                            {
+                                LogMessage(managedSite.Id, $"Webhook error: {ex.Message}");
+                            }
                         }
                     }
                 }
+
                 return result;
             });
+        }
+
+        private async Task UpdateManagedSiteStatus(ManagedSite managedSite, RequestState status, string msg = null)
+        {
+            managedSite.DateLastRenewalAttempt = DateTime.UtcNow;
+
+            if (status == RequestState.Success)
+            {
+                managedSite.RenewalFailureCount = 0;
+                managedSite.LastRenewalStatus = RequestState.Success;
+            }
+            else
+            {
+                managedSite.RenewalFailureMessage = msg;
+                managedSite.RenewalFailureCount++;
+                managedSite.LastRenewalStatus = RequestState.Error;
+            }
+
+            managedSite = await _siteManager.UpdatedManagedSite(managedSite);
+
+            // report request state to status hub clients
+            OnManagedSiteUpdated?.Invoke(managedSite);
+
+            //if reporting enabled, send report
+            if (managedSite.RequestConfig?.EnableFailureNotifications == true)
+            {
+                await ReportManagedSiteStatus(managedSite);
+            }
         }
 
         public List<DomainOption> GetDomainOptionsFromSite(string siteId)
@@ -484,7 +782,7 @@ namespace Certify.Management
             var defaultNoDomainHost = "";
             var domainOptions = new List<DomainOption>();
 
-            var matchingSites = _iisManager.GetSiteBindingList(Certify.Properties.Settings.Default.IgnoreStoppedSites, siteId);
+            var matchingSites = _iisManager.GetSiteBindingList(CoreAppSettings.Current.IgnoreStoppedSites, siteId);
             var siteBindingList = matchingSites.Where(s => s.SiteId == siteId);
 
             bool includeEmptyHostnameBindings = false;
@@ -559,7 +857,7 @@ namespace Certify.Management
             var identifiers = _vaultProvider.GetDomainIdentifiers();
 
             // match existing IIS sites to vault items
-            var iisSites = _iisManager.GetSiteBindingList(ignoreStoppedSites: Certify.Properties.Settings.Default.IgnoreStoppedSites);
+            var iisSites = _iisManager.GetSiteBindingList(ignoreStoppedSites: CoreAppSettings.Current.IgnoreStoppedSites);
 
             foreach (var identifier in identifiers)
             {
@@ -578,7 +876,7 @@ namespace Certify.Management
                     {
                         BindingIPAddress = iisSite?.IP,
                         BindingPort = iisSite?.Port.ToString(),
-                        ChallengeType = "http-01",
+                        ChallengeType = ACMESharpCompat.ACMESharpUtils.CHALLENGE_TYPE_HTTP,
                         EnableFailureNotifications = true,
                         PerformAutoConfig = true,
                         PerformAutomatedCertBinding = true,
@@ -588,7 +886,7 @@ namespace Certify.Management
                         SubjectAlternativeNames = new string[] { identifier.Dns }
                     }
                 };
-                site.AddDomainOption(new DomainOption { Domain = identifier.Dns, IsPrimaryDomain = true, IsSelected = true });
+                site.DomainOptions.Add(new DomainOption { Domain = identifier.Dns, IsPrimaryDomain = true, IsSelected = true });
                 sites.Add(site);
             }
 
@@ -608,7 +906,7 @@ namespace Certify.Management
                         );
                         if (mergedSite != null)
                         {
-                            mergedSite.AddDomainOption(new DomainOption { Domain = s.RequestConfig.PrimaryDomain, IsPrimaryDomain = false, IsSelected = true });
+                            mergedSite.DomainOptions.Add(new DomainOption { Domain = s.RequestConfig.PrimaryDomain, IsPrimaryDomain = false, IsSelected = true });
 
                             //use shortest version of domain name as site name
                             if (mergedSite.RequestConfig.PrimaryDomain.Contains(s.RequestConfig.PrimaryDomain))
@@ -628,49 +926,107 @@ namespace Certify.Management
             return sites;
         }
 
+        public static bool IsRenewalRequired(ManagedSite s, int renewalIntervalDays, bool checkFailureStatus = false)
+        {
+            // if we know the last renewal date, check whether we should renew again, otherwise
+            // assume it's more than 30 days ago by default and attempt renewal
+
+            var timeSinceLastRenewal = (s.DateRenewed.HasValue ? s.DateRenewed.Value : DateTime.Now.AddDays(-30)) - DateTime.Now;
+
+            bool isRenewalRequired = Math.Abs(timeSinceLastRenewal.TotalDays) > renewalIntervalDays;
+
+            // if renewal is required but we have previously failed, scale the frequency of renewal
+            // attempts to a minimum of once per 24hrs.
+            if (isRenewalRequired && checkFailureStatus)
+            {
+                if (s.LastRenewalStatus == RequestState.Error)
+                {
+                    // our last attempt failed, check how many failures we've had to decide whether
+                    // we should attempt now, Scale wait time based on how many attempts we've made.
+                    // Max 48hrs between attempts
+                    if (s.DateLastRenewalAttempt != null && s.RenewalFailureCount > 0)
+                    {
+                        var hoursWait = 48;
+                        if (s.RenewalFailureCount > 0 && s.RenewalFailureCount < 48)
+                        {
+                            hoursWait = s.RenewalFailureCount;
+                        }
+                        var nextAttemptByDate = s.DateLastRenewalAttempt.Value.AddHours(hoursWait);
+                        if (DateTime.Now < nextAttemptByDate)
+                        {
+                            isRenewalRequired = false;
+                        }
+                    }
+                }
+            }
+            return isRenewalRequired;
+        }
+
         public async Task<List<CertificateRequestResult>> PerformRenewalAllManagedSites(bool autoRenewalOnly = true, Dictionary<string, Progress<RequestProgressState>> progressTrackers = null)
         {
-            await Task.Delay(200); //allow UI to update
-                                   //currently the vault won't let us run parallel requests due to file locks
+            if (_isRenewAllInProgress)
+            {
+                Debug.WriteLine("Renew all is already is progress..");
+                return await Task.FromResult(new List<CertificateRequestResult>());
+            }
+
+            this._isRenewAllInProgress = true;
+            //currently the vault won't let us run parallel requests due to file locks
             bool performRequestsInParallel = false;
+
             bool testModeOnly = false;
 
-            _siteManager.LoadSettings();
+            //await _siteManager.LoadAllManagedItems();
 
-            IEnumerable<ManagedSite> sites = _siteManager.GetManagedSites();
+            IEnumerable<ManagedSite> sites = await _siteManager.GetManagedSites(new ManagedSiteFilter { IncludeOnlyNextAutoRenew = true }, reloadAll: true);
 
             if (autoRenewalOnly)
             {
                 sites = sites.Where(s => s.IncludeInAutoRenew == true);
             }
 
-            //check site list and examine current certificates. If certificate is less than n days old, don't attempt to renew it
+            // check site list and examine current certificates. If certificate is less than n days
+            // old, don't attempt to renew it
             var sitesToRenew = new List<ManagedSite>();
-            var renewalIntervalDays = Properties.Settings.Default.RenewalIntervalDays;
+            var renewalIntervalDays = CoreAppSettings.Current.RenewalIntervalDays;
 
-#if DEBUG
-            //in debug mode we renew every time instead of skipping based on days old
-            renewalIntervalDays = 0;
-#endif
             int numRenewalTasks = 0;
-            int maxRenewalTasks = Properties.Settings.Default.MaxRenewalRequests;
+            int maxRenewalTasks = CoreAppSettings.Current.MaxRenewalRequests;
 
             var renewalTasks = new List<Task<CertificateRequestResult>>();
+
+            if (progressTrackers == null)
+            {
+                progressTrackers = new Dictionary<string, Progress<RequestProgressState>>();
+            }
+
             foreach (var s in sites.Where(s => s.IncludeInAutoRenew == true))
             {
-                //if we know the last renewal date, check whether we should renew again, otherwise assume it's more than 30 days ago by default and attempt renewal
-                var timeSinceLastRenewal = (s.DateRenewed != null ? s.DateRenewed : DateTime.Now.AddDays(-30)) - DateTime.Now;
+                RequestProgressState progressState = new RequestProgressState(RequestState.Running, "Starting..", s);
+                var progressIndicator = new Progress<RequestProgressState>(progressState.ProgressReport);
+                progressTrackers.Add(s.Id, progressIndicator);
 
-                bool isRenewalRequired = Math.Abs(timeSinceLastRenewal.Value.TotalDays) > renewalIntervalDays;
-                bool isSiteRunning = true;
+                BeginTrackingProgress(progressState);
 
-                //if we care about stopped sites being stopped, check for that
-                if (Properties.Settings.Default.IgnoreStoppedSites)
+                // determine if this site requires renewal
+                bool isRenewalRequired = IsRenewalRequired(s, renewalIntervalDays);
+                bool isRenewalOnHold = false;
+                if (isRenewalRequired)
                 {
-                    isSiteRunning = IsManagedSiteRunning(s.Id);
+                    //check if we have renewal failures, if so wait a bit longer
+                    isRenewalOnHold = !IsRenewalRequired(s, renewalIntervalDays, checkFailureStatus: true);
+
+                    if (isRenewalOnHold) isRenewalRequired = false;
                 }
 
-                if (isRenewalRequired && isSiteRunning)
+                //if we care about stopped sites being stopped, check for that
+                bool isSiteRunning = true;
+                if (!CoreAppSettings.Current.IgnoreStoppedSites)
+                {
+                    isSiteRunning = await IsManagedSiteRunning(s.Id);
+                }
+
+                if ((isRenewalRequired && isSiteRunning) || testModeOnly)
                 {
                     //get matching progress tracker for this site
                     IProgress<RequestProgressState> tracker = null;
@@ -696,28 +1052,36 @@ namespace Certify.Management
                 }
                 else
                 {
-                    var msg = "Skipping Renewal, existing certificate still OK. ";
+                    var msg = CoreSR.CertifyManager_SkipRenewalOk;
+                    bool logThisEvent = false;
 
                     if (isRenewalRequired && !isSiteRunning)
                     {
                         //TODO: show this as warning rather than success
-                        msg = "Site stopped, renewal skipped as domain validation cannot be performed. ";
+                        msg = CoreSR.CertifyManager_SiteStopped;
+                    }
+
+                    if (isRenewalOnHold)
+                    {
+                        //TODO: show this as warning rather than success
+
+                        msg = String.Format(CoreSR.CertifyManager_RenewalOnHold, s.RenewalFailureCount);
+                        logThisEvent = true;
                     }
 
                     if (progressTrackers != null)
                     {
                         //send progress back to report skip
                         var progress = (IProgress<RequestProgressState>)progressTrackers[s.Id];
-                        if (progress != null) progress.Report(new RequestProgressState { CurrentState = RequestState.Success, Message = msg });
+                        ReportProgress(progress, new RequestProgressState(RequestState.Success, msg, s), logThisEvent);
                     }
-
-                    ManagedSiteLog.AppendLog(s.Id, new ManagedSiteLogItem { EventDate = DateTime.UtcNow, LogItemType = LogItemType.GeneralInfo, Message = msg + s.Name });
                 }
             }
 
             if (!renewalTasks.Any())
             {
                 //nothing to do
+                _isRenewAllInProgress = false;
                 return new List<CertificateRequestResult>();
             }
 
@@ -726,6 +1090,7 @@ namespace Certify.Management
                 var results = await Task.WhenAll(renewalTasks);
 
                 //siteManager.StoreSettings();
+                _isRenewAllInProgress = false;
                 return results.ToList();
             }
             else
@@ -736,17 +1101,18 @@ namespace Certify.Management
                     results.Add(await t);
                 }
 
+                _isRenewAllInProgress = false;
                 return results;
             }
         }
 
-        private bool IsManagedSiteRunning(string id, IISManager iis = null)
+        private async Task<bool> IsManagedSiteRunning(string id, IISManager iis = null)
         {
-            var managedSite = _siteManager.GetManagedSite(id);
+            var managedSite = await _siteManager.GetManagedSite(id);
             if (managedSite != null)
             {
                 if (iis == null) iis = _iisManager;
-                return iis.IsSiteRunning(id);
+                return iis.IsSiteRunning(managedSite.GroupId);
             }
             else
             {
@@ -755,57 +1121,133 @@ namespace Certify.Management
             }
         }
 
-        public bool IsWindowsScheduledTaskPresent()
+        public async Task<bool> IsServerTypeAvailable(StandardServerTypes serverType)
         {
-            var taskList = Microsoft.Win32.TaskScheduler.TaskService.Instance.RootFolder.GetTasks();
-            if (taskList.Any(t => t.Name == SCHEDULED_TASK_NAME))
+            if (serverType == StandardServerTypes.IIS)
             {
-                return true;
+                return await this._iisManager.IsIISAvailableAsync();
+            }
+            return false;
+        }
+
+        public async Task<Version> GetServerTypeVersion(StandardServerTypes serverType)
+        {
+            if (serverType == StandardServerTypes.IIS)
+            {
+                return await this._iisManager.GetIisVersionAsync();
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// For current configured environment, show preview of recommended site management (for
+        /// local IIS, scan sites and recommend actions)
+        /// </summary>
+        /// <returns></returns>
+        public Task<List<ManagedSite>> PreviewManagedSites(StandardServerTypes serverType)
+        {
+            List<ManagedSite> sites = new List<ManagedSite>();
+
+            // FIXME: IIS query is not async
+            if (serverType == StandardServerTypes.IIS)
+            {
+                try
+                {
+                    var iisSites = new IISManager().GetSiteBindingList(ignoreStoppedSites: CoreAppSettings.Current.IgnoreStoppedSites).OrderBy(s => s.SiteId).ThenBy(s => s.Host);
+
+                    var siteIds = iisSites.GroupBy(x => x.SiteId);
+
+                    foreach (var s in siteIds)
+                    {
+                        ManagedSite managedSite = new ManagedSite { Id = s.Key };
+                        managedSite.ItemType = ManagedItemType.SSL_LetsEncrypt_LocalIIS;
+                        managedSite.TargetHost = "localhost";
+                        managedSite.Name = iisSites.First(i => i.SiteId == s.Key).SiteName;
+
+                        //TODO: replace site binding with domain options
+                        //managedSite.SiteBindings = new List<ManagedSiteBinding>();
+
+                        /* foreach (var binding in s)
+                         {
+                             var managedBinding = new ManagedSiteBinding { Hostname = binding.Host, IP = binding.IP, Port = binding.Port, UseSNI = true, CertName = "Certify_" + binding.Host };
+                             // managedSite.SiteBindings.Add(managedBinding);
+                         }*/
+                        sites.Add(managedSite);
+                    }
+                }
+                catch (Exception)
+                {
+                    //can't read sites
+                    Debug.WriteLine("Can't get IIS site list.");
+                }
+            }
+            return Task.FromResult(sites);
+        }
+
+        public RequestProgressState GetRequestProgressState(string managedSiteId)
+        {
+            var progress = this._progressResults.FirstOrDefault(p => p.ManagedItem.Id == managedSiteId);
+            if (progress == null)
+            {
+                return new RequestProgressState(RequestState.NotRunning, "No request in progress", null);
             }
             else
             {
-                return false;
+                return progress;
             }
         }
 
         /// <summary>
-        /// Creates the windows scheduled task to perform renewals, running as the given userid (who
-        /// should be admin level so they can perform cert mgmt and IIS management functions)
+        /// When called, look for periodic tasks we can perform such as renewal 
         /// </summary>
-        /// <param name="userId"></param>
-        /// <param name="pwd"></param>
         /// <returns></returns>
-        public bool CreateWindowsScheduledTask(string userId, string pwd)
+        public async Task<bool> PerformPeriodicTasks()
         {
-            // https://taskscheduler.codeplex.com/documentation
-            var taskService = Microsoft.Win32.TaskScheduler.TaskService.Instance;
-            try
+            Debug.WriteLine("Checking for periodic tasks..");
+            await this.PerformRenewalAllManagedSites(true, null);
+            return await Task.FromResult(true);
+        }
+
+        /// <summary>
+        /// If enabled in the request config, report status of the renewal 
+        /// </summary>
+        /// <param name="managedSite"></param>
+        /// <returns></returns>
+        private async Task ReportManagedSiteStatus(ManagedSite managedSite)
+        {
+            if (this.PluginManager != null && this.PluginManager.DashboardClient != null)
             {
-                var cliPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, SCHEDULED_TASK_EXE);
-
-                //setup auto renewal task, executing as admin using the given username and password
-                var task = taskService.NewTask();
-
-                task.Principal.RunLevel = Microsoft.Win32.TaskScheduler.TaskRunLevel.Highest;
-                task.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction(cliPath, SCHEDULED_TASK_ARGS));
-                task.Triggers.Add(new Microsoft.Win32.TaskScheduler.DailyTrigger { DaysInterval = 1 });
-
-                //register/update task
-                taskService.RootFolder.RegisterTaskDefinition(SCHEDULED_TASK_NAME, task, Microsoft.Win32.TaskScheduler.TaskCreation.CreateOrUpdate, userId, pwd, Microsoft.Win32.TaskScheduler.TaskLogonType.Password);
-
-                return true;
-            }
-            catch (Exception exp)
-            {
-                System.Diagnostics.Debug.WriteLine(exp.ToString());
-                //failed to create task
-                return false;
+                var report = new Models.Shared.RenewalStatusReport
+                {
+                    InstanceId = CoreAppSettings.Current.InstanceId,
+                    MachineName = Environment.MachineName,
+                    PrimaryContactEmail = GetPrimaryContactEmail(),
+                    ManagedSite = managedSite,
+                    AppVersion = new Management.Util().GetAppVersion().ToString()
+                };
+                try
+                {
+                    await this.PluginManager.DashboardClient.ReportRenewalStatusAsync(report);
+                }
+                catch (Exception)
+                {
+                    // failed to report status
+                    LogMessage(managedSite.Id, "Failed send renewal status report.", LogItemType.GeneralWarning);
+                }
             }
         }
 
-        public void DeleteWindowsScheduledTask()
+        public string GetPrimaryContactEmail()
         {
-            Microsoft.Win32.TaskScheduler.TaskService.Instance.RootFolder.DeleteTask(SCHEDULED_TASK_NAME, exceptionOnNotExists: false);
+            var contacts = GetContactRegistrations();
+            if (contacts.Any())
+            {
+                return contacts.FirstOrDefault()?.Name.Replace("mailto:", "");
+            }
+            else
+            {
+                return null;
+            }
         }
     }
 }

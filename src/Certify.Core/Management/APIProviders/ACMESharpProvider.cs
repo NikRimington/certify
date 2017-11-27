@@ -2,7 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace Certify.Management.APIProviders
@@ -13,7 +12,7 @@ namespace Certify.Management.APIProviders
 
         public ACMESharpProvider()
         {
-            _vaultManager = new VaultManager(Properties.Settings.Default.VaultPath, ACMESharp.Vault.Providers.LocalDiskVault.VAULT);
+            _vaultManager = new VaultManager(CoreAppSettings.Current.VaultPath);
             _vaultManager.UseEFSForSensitiveFiles = false;
         }
 
@@ -89,6 +88,11 @@ namespace Certify.Management.APIProviders
             return _vaultManager.GetVaultPath();
         }
 
+        public List<string> GetActionSummary()
+        {
+            return _vaultManager.GetActionLogSummary();
+        }
+
         public void EnableSensitiveFileEncryption()
         {
             _vaultManager.UseEFSForSensitiveFiles = true;
@@ -101,7 +105,23 @@ namespace Certify.Management.APIProviders
 
         public PendingAuthorization PerformIISAutomatedChallengeResponse(IISManager iisManager, ManagedSite managedSite, PendingAuthorization pendingAuth)
         {
-            return _vaultManager.PerformIISAutomatedChallengeResponse(iisManager, managedSite, pendingAuth);
+            var processedAuth = _vaultManager.PerformIISAutomatedChallengeResponse(iisManager, managedSite, pendingAuth);
+
+            /*// FIXME: vault logs need to be filtered by managed site
+            if (_vaultManager.ActionLogs != null)
+            {
+                processedAuth.LogItems = new List<string>();
+                foreach (var a in _vaultManager.ActionLogs)
+                {
+                    processedAuth.LogItems.Add(a.Command + (a.Result != null ? a.Result : ""));
+                }
+            }*/
+            return processedAuth;
+        }
+
+        public async Task<APIResult> TestChallengeResponse(IISManager iisManager, ManagedSite managedSite, bool isPreviewMode)
+        {
+            return await _vaultManager.TestChallengeResponse(iisManager, managedSite, isPreviewMode);
         }
 
         public void SubmitChallenge(string domainIdentifierId, string challengeType)
@@ -119,6 +139,11 @@ namespace Certify.Management.APIProviders
             return _vaultManager.PerformCertificateRequestProcess(primaryDnsIdentifier, alternativeDnsIdentifiers);
         }
 
+        public async Task<APIResult> RevokeCertificate(ManagedSite managedSite)
+        {
+            return await _vaultManager.RevokeCertificate(managedSite.CertificatePath);
+        }
+
         #region IACMEClientProvider methods
 
         public bool AddNewRegistrationAndAcceptTOS(string email)
@@ -129,6 +154,16 @@ namespace Certify.Management.APIProviders
         public string GetAcmeBaseURI()
         {
             return _vaultManager.GetACMEBaseURI();
+        }
+
+        public void PerformVaultCleanup()
+        {
+            _vaultManager.CleanupVault();
+        }
+
+        public ActionLogItem GetLastActionLogItem()
+        {
+            return _vaultManager.ActionLogs.LastOrDefault();
         }
 
         #endregion IACMEClientProvider methods

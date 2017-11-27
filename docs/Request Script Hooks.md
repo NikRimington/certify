@@ -58,16 +58,16 @@ Notes: Post-request scripts are executed immediately after the Certificate Reque
 ```PowerShell
 param($result)
 if (!$result.IsSuccess) {
-    $EmailFrom = "username@gmail.com"
-    $EmailTo = "username@gmail.com" 
-    $Subject = "Cert Request Failed: " + $result.ManagedItem.RequestConfig.PrimaryDomain
-    $Body = "Error: " + $result.Message 
-    $SMTPServer = "smtp.gmail.com" 
-    $SMTPClient = New-Object Net.Mail.SmtpClient($SmtpServer, 587) 
-    $SMTPClient.EnableSsl = $true 
-    $SMTPClient.Credentials = New-Object System.Net.NetworkCredential("username@gmail.com", "password"); 
-    $SMTPClient.Send($EmailFrom, $EmailTo, $Subject, $Body)
-    write-output "Sent notification email"
+   $EmailFrom = "username@gmail.com"
+   $EmailTo = "username@gmail.com" 
+   $Subject = "Cert Request Failed: " + $result.ManagedItem.RequestConfig.PrimaryDomain
+   $Body = "Error: " + $result.Message 
+   $SMTPServer = "smtp.gmail.com" 
+   $SMTPClient = New-Object Net.Mail.SmtpClient($SmtpServer, 587) 
+   $SMTPClient.EnableSsl = $true 
+   $SMTPClient.Credentials = New-Object System.Net.NetworkCredential("username@gmail.com", "password"); 
+   $SMTPClient.Send($EmailFrom, $EmailTo, $Subject, $Body)
+   write-output "Sent notification email"
 }
 ```
 
@@ -76,10 +76,10 @@ if (!$result.IsSuccess) {
 ```PowerShell
 param($result)
 if ($result.IsSuccess -and $result.ManagedItem.GroupId -eq 1) {
-	write-output "Restarting RRAS..."
-	Net Stop RemoteAccess
-	Net Start RemoteAccess
-	write-output "Done"
+   write-output "Restarting RRAS..."
+   Net Stop RemoteAccess
+   Net Start RemoteAccess
+   write-output "Done"
 }
 ```
 
@@ -95,6 +95,22 @@ certutil -p Certify -csp "Microsoft RSA SChannel Cryptographic Provider" -import
 remove-item $tempfile
 ```
 
+### Example: update Remote Desktop Role Certificates
+(switches to 64-bit powershell to import the 64-bit RemoteDesktop module)
+```PowerShell
+param($result)
+set-alias ps64 "$env:windir\sysnative\WindowsPowerShell\v1.0\powershell.exe" 
+ps64 -args $result -command {
+   $result = $args[0]
+   $pfxpath = $result.ManagedItem.CertificatePath
+   Import-Module RemoteDesktop
+   Set-RDCertificate -Role RDPublishing -ImportPath $pfxpath -Force
+   Set-RDCertificate -Role RDWebAcces -ImportPath $pfxpath -Force
+   Set-RDCertificate -Role RDGateway -ImportPath $pfxpath -Force
+   Set-RDCertificate -Role RDRedirector -ImportPath $pfxpath -Force
+}
+```
+
 ## Troubleshooting
 
 <img src="images/testing request script hooks.png">
@@ -102,3 +118,17 @@ remove-item $tempfile
 * In the Certify UI, you may test scripts by clicking the "Test" button after entering the script filename for the hook you would like to test. 
 * For a testing pre-request script, the `$result.IsSuccess` value will be `$false`, and for a post-request script the value will be `$true`. 
 * The `$result.MangagedItem.CertificatePath` value be set to the filename (including path) of the PFX file containing the requested certificate, unless the site is new and has not had a successful Certificate Request, in which case the value will not be set.
+
+### Using 64-bit modules
+
+If you attempt to import a module with [`Import-Module`](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/import-module?view=powershell-5.1) that does not run in 32-bit mode (i.e. RemoteDesktop), you may receive an error like `"Import-Module : The specified module 'RemoteDesktop' was not loaded because no valid module file was found in any module directory."`. To load a 64-bit module you can use this snippet to pass the `$result` object to a script running in 64-bit powershell:
+```powershell
+param($result)
+set-alias ps64 "$env:windir\sysnative\WindowsPowerShell\v1.0\powershell.exe" 
+ps64 -args $result -command {
+   $result = $args[0]
+   write-output $result.IsSuccess
+   import-module -name RemoteDesktop
+   Set-RDCertificate ...
+}
+```

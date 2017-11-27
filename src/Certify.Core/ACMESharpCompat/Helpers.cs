@@ -1,7 +1,7 @@
-﻿using System;
-using ACMESharp.JOSE;
+﻿using ACMESharp.JOSE;
 using ACMESharp.PKI;
 using ACMESharp.Vault.Model;
+using System;
 using System.IO;
 
 /*
@@ -28,9 +28,10 @@ namespace ACMESharp.POSH.Util
     {
         public static AcmeClient GetClient(VaultInfo Config)
         {
-            var p = Config.Proxy;
             var _Client = new AcmeClient();
 
+            _Client.UserAgent = $"Certify/{0} {_Client.UserAgent}";
+            _Client.Language = "en-US, en;q=0.8";
             _Client.RootUrl = new Uri(Config.BaseUri);
             _Client.Directory = Config.ServerDirectory;
 

@@ -53,7 +53,18 @@ namespace Certify.Management.APIProviders
             return null;
         }
 
+        public List<string> GetActionSummary()
+        {
+            System.Diagnostics.Debug.WriteLine("Certes: GetActionSummary not implemented");
+            return null;
+        }
+
         public void EnableSensitiveFileEncryption()
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task<APIResult> RevokeCertificate(ManagedSite managedSite)
         {
             throw new NotImplementedException();
         }
@@ -101,6 +112,11 @@ namespace Certify.Management.APIProviders
             throw new NotImplementedException();
         }
 
+        public Task<APIResult> TestChallengeResponse(IISManager iISManager, ManagedSite managedSite, bool isPreviewMode)
+        {
+            throw new NotImplementedException();
+        }
+
         public void SubmitChallenge(string domainIdentifierId, string challengeType)
         {
             throw new NotImplementedException();
@@ -112,6 +128,16 @@ namespace Certify.Management.APIProviders
         }
 
         public ProcessStepResult PerformCertificateRequestProcess(string primaryDnsIdentifier, string[] alternativeDnsIdentifiers)
+        {
+            throw new NotImplementedException();
+        }
+
+        public void PerformVaultCleanup()
+        {
+            throw new NotImplementedException();
+        }
+
+        public ActionLogItem GetLastActionLogItem()
         {
             throw new NotImplementedException();
         }

@@ -1,21 +1,13 @@
-﻿using System;
-using System.Collections.Generic;
+using Certify.Locales;
+using System;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 
 namespace Certify.UI.Windows
 {
     /// <summary>
-    /// Interaction logic for ScheduledTaskConfig.xaml
+    /// Interaction logic for ScheduledTaskConfig.xaml 
     /// </summary>
     public partial class ScheduledTaskConfig
     {
@@ -26,12 +18,12 @@ namespace Certify.UI.Windows
             InitializeComponent();
             //check if scheduled task already configured
 
-            var certifyManager = new Certify.Management.CertifyManager();
-            TaskConfigured = certifyManager.IsWindowsScheduledTaskPresent();
+            var taskScheduler = new Shared.TaskScheduler();
+            TaskConfigured = taskScheduler.IsWindowsScheduledTaskPresent();
 
             if (TaskConfigured)
             {
-                AutoRenewPrompt.Text = "The auto renewal task is already configured. If required you can change the admin user account used to execute the task.";
+                AutoRenewPrompt.Text = SR.ScheduledTaskConfig_AlreadyConfiged;
                 AutoRenewPrompt.Foreground = Brushes.DarkGreen;
             }
         }
@@ -41,20 +33,20 @@ namespace Certify.UI.Windows
             //create/update scheduled task
             if (!String.IsNullOrEmpty(Username.Text) && (!String.IsNullOrEmpty(Password.Password)))
             {
-                var certifyManager = new Certify.Management.CertifyManager();
-                if (certifyManager.CreateWindowsScheduledTask(Username.Text, Password.Password))
+                var taskScheduler = new Shared.TaskScheduler();
+                if (taskScheduler.CreateWindowsScheduledTask(Username.Text, Password.Password))
                 {
-                    MessageBox.Show("Scheduled task created");
+                    MessageBox.Show(SR.ScheduledTaskConfig_TaskCreated);
                     this.Close();
                 }
                 else
                 {
-                    MessageBox.Show("Failed to create scheduled task with given credentials");
+                    MessageBox.Show(SR.ScheduledTaskConfig_FailedToCreateTask);
                 }
             }
             else
             {
-                MessageBox.Show("Please provide the username and password for an admin level user.");
+                MessageBox.Show(SR.ScheduledTaskConfig_PleaseProvideCredential);
             }
         }
 
